@@ -50,7 +50,10 @@ function renderHome() {
   const app = $('#app')!;
   app.innerHTML = `
     <div class="card">
-      <h1>Pridge ${getNetworkBadge()}</h1>
+      <div class="logo-header">
+        <img src="/logo-minimal.svg" alt="Pridge" class="logo" />
+        <h1>Pridge ${getNetworkBadge()}</h1>
+      </div>
       <p class="subtitle">Private multichain to Solana transfers</p>
       
       <div class="section">
@@ -84,7 +87,10 @@ function renderDeposit() {
   const app = $('#app')!;
   app.innerHTML = `
     <div class="card">
-      <h1>Pridge ${getNetworkBadge()}</h1>
+      <div class="logo-header">
+        <img src="/logo-minimal.svg" alt="Pridge" class="logo" />
+        <h1>Pridge ${getNetworkBadge()}</h1>
+      </div>
       
       <div class="warning-box">
         <p class="warning-title">Save your claim link first!</p>

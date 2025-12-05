@@ -46,10 +46,22 @@ body {
   padding: 32px;
 }
 
+.logo-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.logo {
+  width: 40px;
+  height: 40px;
+}
+
 h1 {
   font-size: 24px;
   font-weight: 600;
-  margin-bottom: 8px;
+  margin: 0;
   background: linear-gradient(135deg, var(--text) 0%, var(--accent) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;

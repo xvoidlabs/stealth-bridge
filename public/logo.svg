@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
+  <!-- Background circle -->
+  <circle cx="60" cy="60" r="56" fill="#0a0a0f" stroke="#00d9ff" stroke-width="2"/>
+  
+  <!-- Bridge arch - represents connection -->
+  <path d="M24 72 Q60 32 96 72" stroke="#00d9ff" stroke-width="4" fill="none" stroke-linecap="round"/>
+  
+  <!-- Bridge pillars -->
+  <line x1="36" y1="72" x2="36" y2="88" stroke="#00d9ff" stroke-width="4" stroke-linecap="round"/>
+  <line x1="84" y1="72" x2="84" y2="88" stroke="#00d9ff" stroke-width="4" stroke-linecap="round"/>
+  
+  <!-- Privacy shield in center -->
+  <path d="M60 44 L72 50 L72 62 Q72 74 60 80 Q48 74 48 62 L48 50 Z" fill="#00d9ff" opacity="0.2" stroke="#00d9ff" stroke-width="2"/>
+  
+  <!-- Lock keyhole -->
+  <circle cx="60" cy="58" r="4" fill="#00d9ff"/>
+  <rect x="57" y="60" width="6" height="8" rx="1" fill="#00d9ff"/>
+</svg>
+
