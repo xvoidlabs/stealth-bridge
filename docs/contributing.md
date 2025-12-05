@@ -5,8 +5,8 @@ Pridge is open source and welcomes contributions.
 ## Repository
 
 ```bash
-git clone https://github.com/xvoidlabs/stealth-bridge
-cd stealth-bridge
+git clone https://github.com/xvoidlabs/pridge
+cd pridge
 ```
 
 ## Development Setup
