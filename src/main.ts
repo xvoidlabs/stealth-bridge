@@ -1021,6 +1021,7 @@ function saveStealthWallet(wallet: stealth.StealthWallet) {
   localStorage.setItem(STEALTH_WALLET_KEY, stealth.exportStealthWallet(wallet));
 }
 
+// @ts-ignore - Function will be enabled after testing
 function renderStealth() {
   // Load existing wallet or show create option
   if (!state.stealthWallet) {
