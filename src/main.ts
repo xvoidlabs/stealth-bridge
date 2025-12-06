@@ -47,6 +47,7 @@ interface AppState {
   selectedToken: string;
   quote: debridge.DeBridgeQuote | null;
   solWalletConnected: boolean;
+  expiresAt: number | null; // Unix timestamp for claim expiration
 }
 
 const state: AppState = {
@@ -59,14 +60,16 @@ const state: AppState = {
   selectedToken: 'NATIVE',
   quote: null,
   solWalletConnected: false,
+  expiresAt: null,
 };
 
 function detectMode(): 'home' | 'claim' {
   const fragment = window.location.hash.slice(1);
   if (fragment && fragment.length > 40) {
-    const keypair = kp.fromClaimFragment(fragment);
-    if (keypair) {
-      state.disposable = keypair;
+    const claimData = kp.fromClaimFragment(fragment);
+    if (claimData) {
+      state.disposable = claimData.keypair;
+      state.expiresAt = claimData.expiresAt;
       return 'claim';
     }
   }
@@ -104,13 +107,27 @@ function renderHome() {
   });
 }
 
+// Expiration options in seconds
+const EXPIRATION_OPTIONS = [
+  { label: 'Never', value: 0 },
+  { label: '1 hour', value: 3600 },
+  { label: '24 hours', value: 86400 },
+  { label: '7 days', value: 604800 },
+  { label: '30 days', value: 2592000 },
+];
+
 function renderDeposit() {
   if (!state.disposable) return renderHome();
 
   const address = state.disposable.publicKey.toBase58();
-  const claimUrl = kp.getClaimUrl(state.disposable);
+  const claimUrl = kp.getClaimUrl(state.disposable, state.expiresAt);
   const wallet = evmWallet.getCurrentWallet();
   const chainEntries = Object.entries(evmWallet.SUPPORTED_CHAINS);
+
+  // Format expiration for display
+  const expirationText = state.expiresAt 
+    ? new Date(state.expiresAt * 1000).toLocaleString()
+    : 'Never';
 
   const app = $('#app')!;
   app.innerHTML = `
@@ -127,6 +144,18 @@ function renderDeposit() {
           <button id="btn-copy-link" class="btn-icon">Copy</button>
         </div>
         <p class="warning-text">Anyone with this link can claim the funds.</p>
+        <div class="expiration-row">
+          <label>Link expires:</label>
+          <select id="expiration-select">
+            ${EXPIRATION_OPTIONS.map(opt => {
+              const isSelected = state.expiresAt 
+                ? (opt.value > 0 && state.expiresAt === Math.floor(Date.now() / 1000) + opt.value)
+                : opt.value === 0;
+              return `<option value="${opt.value}" ${isSelected ? 'selected' : ''}>${opt.label}</option>`;
+            }).join('')}
+          </select>
+          <span id="expiration-display" class="expiration-display">${state.expiresAt ? `(${expirationText})` : ''}</span>
+        </div>
       </div>
       
       <div class="divider"></div>
@@ -231,7 +260,8 @@ function renderDeposit() {
 
   // Event listeners
   $('#btn-copy-link')!.addEventListener('click', async () => {
-    await copyToClipboard(claimUrl);
+    const currentUrl = kp.getClaimUrl(state.disposable!, state.expiresAt);
+    await copyToClipboard(currentUrl);
     showToast('Claim link copied!');
   });
 
@@ -240,12 +270,29 @@ function renderDeposit() {
     showToast('Address copied!');
   });
 
+  // Expiration selector
+  $('#expiration-select')?.addEventListener('change', (e) => {
+    const seconds = parseInt((e.target as HTMLSelectElement).value);
+    if (seconds > 0) {
+      state.expiresAt = Math.floor(Date.now() / 1000) + seconds;
+      const expirationDate = new Date(state.expiresAt * 1000).toLocaleString();
+      $('#expiration-display')!.textContent = `(${expirationDate})`;
+    } else {
+      state.expiresAt = null;
+      $('#expiration-display')!.textContent = '';
+    }
+    // Update the claim URL input
+    const newUrl = kp.getClaimUrl(state.disposable!, state.expiresAt);
+    ($('#claim-url') as HTMLInputElement).value = newUrl;
+  });
+
   $('#btn-back')!.addEventListener('click', () => {
     if (state.stopPolling) state.stopPolling();
     state.disposable = null;
     state.balances = null;
     state.evmConnected = false;
     state.quote = null;
+    state.expiresAt = null;
     state.mode = 'home';
     renderHome();
   });
@@ -537,11 +584,21 @@ async function updateTokenBalance() {
   }
 }
 
+let expirationInterval: ReturnType<typeof setInterval> | null = null;
+
 function renderClaim() {
   if (!state.disposable) return renderHome();
 
+  // Clear any existing expiration interval
+  if (expirationInterval) {
+    clearInterval(expirationInterval);
+    expirationInterval = null;
+  }
+
   const address = state.disposable.publicKey.toBase58();
   const connectedWallet = solWallet.getCurrentWallet();
+  const timeInfo = kp.getTimeRemaining(state.expiresAt);
+  const isLinkExpired = timeInfo.expired;
 
   const app = $('#app')!;
   app.innerHTML = `
@@ -549,61 +606,78 @@ function renderClaim() {
       <h1>Claim Your Funds ${getNetworkBadge()}</h1>
       <p class="subtitle">From: ${formatAddress(address)}</p>
       
-      <div id="loading-balances" class="status">
-        <span class="spinner"></span>
-        <span>Loading balances...</span>
-      </div>
+      ${state.expiresAt ? `
+        <div id="expiration-banner" class="expiration-banner ${isLinkExpired ? 'expired' : ''}">
+          <span class="expiration-icon">${isLinkExpired ? 'X' : 'i'}</span>
+          <span id="expiration-text">${timeInfo.text}</span>
+        </div>
+      ` : ''}
       
-      <div id="balance-display" style="display: none;">
-        <p class="label">Available:</p>
-        <div class="balance-list" id="balance-list"></div>
-      </div>
-      
-      <div id="no-sol-warning" class="warning-box" style="display: none;">
-        <p class="warning-title">⚠️ No SOL for fees</p>
-        <p class="warning-text">The disposable address has tokens but no SOL for transaction fees. Connect your Phantom wallet to pay fees automatically.</p>
-      </div>
-      
-      <div id="empty-notice" style="display: none;">
-        <p class="warning">No funds found in this address.</p>
-      </div>
-      
-      <div class="divider"></div>
-      
-      <div id="wallet-section">
-        ${state.solWalletConnected && connectedWallet ? `
-          <div class="wallet-connected">
-            <span class="wallet-dot"></span>
-            <span>Phantom: ${solWallet.formatAddress(connectedWallet.publicKey)}</span>
-            <button id="btn-disconnect-sol" class="btn-small">Disconnect</button>
-          </div>
-          <p class="fee-note">✓ Your wallet will pay the transaction fee (~0.00025 SOL)</p>
-        ` : `
-          <button id="btn-connect-phantom" class="btn-secondary">Connect Phantom (Pay Fees)</button>
-          <p class="connect-hint">Or enter any Solana address below</p>
-        `}
-      </div>
-      
-      <div class="input-group">
-        <label for="dest-address">Destination Wallet:</label>
-        <input type="text" id="dest-address" placeholder="Enter Solana address..." value="${connectedWallet ? connectedWallet.publicKey.toBase58() : ''}" />
-      </div>
-      
-      <button id="btn-claim" class="btn-primary" disabled>Claim All</button>
-      
-      <div id="claim-status" style="display: none;">
-        <div class="status" id="claiming">
+      ${isLinkExpired ? `
+        <div class="expired-notice">
+          <p class="expired-title">This claim link has expired</p>
+          <p class="expired-text">The funds may still be in the disposable address, but this link is no longer valid for claiming.</p>
+        </div>
+      ` : `
+        <div id="loading-balances" class="status">
           <span class="spinner"></span>
-          <span id="claim-status-text">Claiming...</span>
+          <span>Loading balances...</span>
         </div>
-        <div class="status success" id="claim-success" style="display: none;">
-          <span class="check">✓</span>
-          <span>Claimed successfully!</span>
+        
+        <div id="balance-display" style="display: none;">
+          <p class="label">Available:</p>
+          <div class="balance-list" id="balance-list"></div>
         </div>
-        <a id="tx-link" href="#" target="_blank" rel="noopener" style="display: none;">View transaction</a>
-      </div>
+        
+        <div id="no-sol-warning" class="warning-box" style="display: none;">
+          <p class="warning-title">No SOL for fees</p>
+          <p class="warning-text">The disposable address has tokens but no SOL for transaction fees. Connect your Phantom wallet to pay fees automatically.</p>
+        </div>
+        
+        <div id="empty-notice" style="display: none;">
+          <p class="warning">No funds found in this address.</p>
+        </div>
+        
+        <div class="divider"></div>
+        
+        <div id="wallet-section">
+          ${state.solWalletConnected && connectedWallet ? `
+            <div class="wallet-connected">
+              <span class="wallet-dot"></span>
+              <span>Phantom: ${solWallet.formatAddress(connectedWallet.publicKey)}</span>
+              <button id="btn-disconnect-sol" class="btn-small">Disconnect</button>
+            </div>
+            <p class="fee-note">Your wallet will pay the transaction fee (~0.00025 SOL)</p>
+          ` : `
+            <button id="btn-connect-phantom" class="btn-secondary">Connect Phantom (Pay Fees)</button>
+            <p class="connect-hint">Or enter any Solana address below</p>
+          `}
+        </div>
+        
+        <div class="input-group">
+          <label for="dest-address">Destination Wallet:</label>
+          <input type="text" id="dest-address" placeholder="Enter Solana address..." value="${connectedWallet ? connectedWallet.publicKey.toBase58() : ''}" />
+        </div>
+        
+        <button id="btn-claim" class="btn-primary" disabled>Claim All</button>
+        
+        <div id="claim-status" style="display: none;">
+          <div class="status" id="claiming">
+            <span class="spinner"></span>
+            <span id="claim-status-text">Claiming...</span>
+          </div>
+          <div class="status success" id="claim-success" style="display: none;">
+            <span class="check">OK</span>
+            <span>Claimed successfully!</span>
+          </div>
+          <a id="tx-link" href="#" target="_blank" rel="noopener" style="display: none;">View transaction</a>
+        </div>
+      `}
     </div>
   `;
+
+  // Don't proceed if expired
+  if (isLinkExpired) return;
 
   const destInput = $('#dest-address') as HTMLInputElement;
   const claimBtn = $('#btn-claim') as HTMLButtonElement;
@@ -702,6 +776,32 @@ function renderClaim() {
       destInput.disabled = false;
     }
   });
+
+  // Start expiration countdown timer if applicable
+  if (state.expiresAt && !kp.isExpired(state.expiresAt)) {
+    expirationInterval = setInterval(() => {
+      const timeInfo = kp.getTimeRemaining(state.expiresAt);
+      const expirationText = $('#expiration-text');
+      const expirationBanner = $('#expiration-banner');
+      
+      if (expirationText) {
+        expirationText.textContent = timeInfo.text;
+      }
+      
+      if (timeInfo.expired) {
+        // Link just expired - re-render to show expired state
+        if (expirationInterval) {
+          clearInterval(expirationInterval);
+          expirationInterval = null;
+        }
+        if (expirationBanner) {
+          expirationBanner.classList.add('expired');
+        }
+        showToast('This claim link has expired');
+        renderClaim();
+      }
+    }, 1000);
+  }
 
   loadClaimBalances();
 }

@@ -21,7 +21,7 @@ Our vision for Pridge: the most private, user-friendly cross-chain bridge to Sol
 ### Phase 2: Enhanced Privacy
 - [ ] **Light Protocol Integration** - Shielded transactions for amount privacy
 - [ ] **Multiple Claim Outputs** - Split funds across multiple destinations
-- [ ] **Time-Locked Claims** - Set expiration on claim links
+- [x] **Time-Locked Claims** - Set expiration on claim links
 
 ### Phase 3: Token Support
 - [x] **USDC Bridging** - Stable coin support
