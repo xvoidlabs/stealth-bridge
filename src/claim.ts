@@ -138,6 +138,11 @@ export interface ClaimOptions {
   };
 }
 
+export interface SplitDestination {
+  address: PublicKey;
+  percentage: number; // 0-100
+}
+
 export async function claimAll(
   disposable: Keypair,
   destination: PublicKey,
@@ -306,6 +311,215 @@ export async function claimAll(
     signature: sig,
     blockhash: fresh.blockhash,
     lastValidBlockHeight: fresh.lastValidBlockHeight,
+  });
+
+  return sig;
+}
+
+export async function claimSplit(
+  disposable: Keypair,
+  destinations: SplitDestination[],
+  options?: ClaimOptions
+): Promise<string> {
+  // Validate destinations
+  if (destinations.length === 0) {
+    throw new Error('At least one destination required');
+  }
+  
+  if (destinations.length > 10) {
+    throw new Error('Maximum 10 destinations supported');
+  }
+  
+  const totalPercent = destinations.reduce((sum, d) => sum + d.percentage, 0);
+  if (Math.abs(totalPercent - 100) > 0.01) {
+    throw new Error('Percentages must sum to 100%');
+  }
+
+  const conn = getConnection();
+  const feePayer = options?.feePayer;
+  
+  console.log('Split claim from:', disposable.publicKey.toBase58());
+  console.log('Destinations:', destinations.map(d => ({
+    address: d.address.toBase58(),
+    percentage: d.percentage
+  })));
+  console.log('Network:', useMainnet ? 'MAINNET' : 'DEVNET');
+  
+  const tx = new Transaction();
+
+  // Get SOL balance
+  const solBalance = await conn.getBalance(disposable.publicKey);
+  console.log('SOL balance:', solBalance / LAMPORTS_PER_SOL);
+
+  // Get all token accounts
+  const tokenAccounts = await conn.getParsedTokenAccountsByOwner(
+    disposable.publicKey,
+    { programId: TOKEN_PROGRAM_ID }
+  );
+  console.log('Token accounts found:', tokenAccounts.value.length);
+
+  const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+  
+  // Track wSOL that will be unwrapped to native SOL
+  let wsolAmount = 0n;
+  let wsolTokenAccount: PublicKey | null = null;
+  
+  // Process token accounts
+  for (const { account, pubkey } of tokenAccounts.value) {
+    const info = account.data.parsed.info;
+    const mint = new PublicKey(info.mint);
+    const amount = BigInt(info.tokenAmount.amount);
+    const decimals = info.tokenAmount.decimals;
+
+    if (amount === 0n) continue;
+
+    // Handle wSOL specially - unwrap first, then split native SOL
+    if (mint.toBase58() === WSOL_MINT) {
+      wsolAmount = amount;
+      wsolTokenAccount = pubkey;
+      console.log('wSOL found:', info.tokenAmount.uiAmount, 'will be unwrapped and split');
+      continue;
+    }
+
+    // For other tokens, split across destinations
+    console.log('Splitting token:', mint.toBase58(), 'Amount:', info.tokenAmount.uiAmount);
+    
+    let remainingAmount = amount;
+    
+    for (let i = 0; i < destinations.length; i++) {
+      const dest = destinations[i];
+      const isLast = i === destinations.length - 1;
+      
+      // Calculate amount for this destination
+      const destAmount = isLast 
+        ? remainingAmount  // Last destination gets remainder to avoid rounding issues
+        : BigInt(Math.floor(Number(amount) * dest.percentage / 100));
+      
+      if (destAmount === 0n) continue;
+      remainingAmount -= destAmount;
+      
+      const destAta = await getAssociatedTokenAddress(mint, dest.address);
+      const destAtaInfo = await conn.getAccountInfo(destAta);
+      
+      if (!destAtaInfo) {
+        tx.add(
+          createAssociatedTokenAccountInstruction(
+            feePayer?.publicKey || disposable.publicKey,
+            destAta,
+            dest.address,
+            mint
+          )
+        );
+      }
+
+      tx.add(
+        createTransferCheckedInstruction(
+          pubkey,
+          mint,
+          destAta,
+          disposable.publicKey,
+          destAmount,
+          decimals
+        )
+      );
+    }
+
+    // Close token account, send rent to fee payer or disposable
+    tx.add(
+      createCloseAccountInstruction(
+        pubkey,
+        feePayer?.publicKey || disposable.publicKey,
+        disposable.publicKey
+      )
+    );
+  }
+
+  // If we have wSOL, close it first to unwrap to native SOL
+  // The unwrapped SOL goes to disposable, then we split it with the other SOL
+  if (wsolTokenAccount && wsolAmount > 0n) {
+    tx.add(
+      createCloseAccountInstruction(
+        wsolTokenAccount,
+        disposable.publicKey,  // Unwrap to disposable first
+        disposable.publicKey
+      )
+    );
+  }
+
+  // Calculate total SOL to split (existing balance + unwrapped wSOL)
+  const totalSolLamports = solBalance + Number(wsolAmount);
+  
+  if (totalSolLamports > 0) {
+    // Reserve for fees if disposable is paying
+    const feeReserve = feePayer ? 0 : 5000;
+    const distributableSol = totalSolLamports - feeReserve;
+    
+    if (distributableSol > 0) {
+      let remainingSol = distributableSol;
+      
+      for (let i = 0; i < destinations.length; i++) {
+        const dest = destinations[i];
+        const isLast = i === destinations.length - 1;
+        
+        const destAmount = isLast
+          ? remainingSol
+          : Math.floor(distributableSol * dest.percentage / 100);
+        
+        if (destAmount > 0) {
+          remainingSol -= destAmount;
+          
+          tx.add(
+            SystemProgram.transfer({
+              fromPubkey: disposable.publicKey,
+              toPubkey: dest.address,
+              lamports: destAmount,
+            })
+          );
+          
+          console.log(`SOL to ${dest.address.toBase58().slice(0,8)}...: ${destAmount / LAMPORTS_PER_SOL}`);
+        }
+      }
+    }
+  }
+
+  if (tx.instructions.length === 0) {
+    throw new Error('Nothing to claim');
+  }
+
+  // Set fee payer and recent blockhash
+  const feePayerPubkey = feePayer?.publicKey || disposable.publicKey;
+  
+  if (!feePayer && solBalance === 0 && wsolAmount === 0n) {
+    throw new Error('No SOL for fees. Connect your wallet to pay fees.');
+  }
+
+  const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash();
+  tx.feePayer = feePayerPubkey;
+  tx.recentBlockhash = blockhash;
+
+  // Sign with disposable key
+  tx.partialSign(disposable);
+
+  // If external fee payer, have them sign
+  if (feePayer) {
+    console.log('Requesting fee payer signature...');
+    const signedTx = await feePayer.signTransaction(tx);
+    Object.assign(tx, signedTx);
+  }
+
+  console.log('Sending split transaction with', tx.instructions.length, 'instructions');
+
+  const sig = await conn.sendRawTransaction(tx.serialize(), {
+    skipPreflight: true,
+    preflightCommitment: 'confirmed',
+  });
+
+  console.log('Transaction sent:', sig);
+
+  await conn.confirmTransaction({
+    signature: sig,
+    blockhash,
+    lastValidBlockHeight,
   });
 
   return sig;

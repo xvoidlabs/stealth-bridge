@@ -37,6 +37,11 @@ function getFooter(): string {
   `;
 }
 
+interface SplitDest {
+  address: string;
+  percentage: number;
+}
+
 interface AppState {
   mode: 'home' | 'deposit' | 'claim';
   disposable: Keypair | null;
@@ -48,6 +53,8 @@ interface AppState {
   quote: debridge.DeBridgeQuote | null;
   solWalletConnected: boolean;
   expiresAt: number | null; // Unix timestamp for claim expiration
+  splitMode: boolean;
+  splitDestinations: SplitDest[];
 }
 
 const state: AppState = {
@@ -61,6 +68,8 @@ const state: AppState = {
   quote: null,
   solWalletConnected: false,
   expiresAt: null,
+  splitMode: false,
+  splitDestinations: [{ address: '', percentage: 100 }],
 };
 
 function detectMode(): 'home' | 'claim' {
@@ -654,9 +663,38 @@ function renderClaim() {
           `}
         </div>
         
-        <div class="input-group">
-          <label for="dest-address">Destination Wallet:</label>
-          <input type="text" id="dest-address" placeholder="Enter Solana address..." value="${connectedWallet ? connectedWallet.publicKey.toBase58() : ''}" />
+        <div class="split-toggle">
+          <label class="toggle-label">
+            <input type="checkbox" id="split-mode-toggle" ${state.splitMode ? 'checked' : ''} />
+            <span class="toggle-text">Split to multiple wallets</span>
+          </label>
+        </div>
+        
+        <div id="single-dest" style="${state.splitMode ? 'display: none;' : ''}">
+          <div class="input-group">
+            <label for="dest-address">Destination Wallet:</label>
+            <input type="text" id="dest-address" placeholder="Enter Solana address..." value="${connectedWallet ? connectedWallet.publicKey.toBase58() : ''}" />
+          </div>
+        </div>
+        
+        <div id="split-dest" style="${state.splitMode ? '' : 'display: none;'}">
+          <div class="split-header">
+            <span class="label">Split Destinations</span>
+            <button id="btn-add-dest" class="btn-icon-small">+ Add</button>
+          </div>
+          <div id="split-list">
+            ${state.splitDestinations.map((d, i) => `
+              <div class="split-row" data-index="${i}">
+                <input type="text" class="split-address" placeholder="Solana address..." value="${d.address}" />
+                <input type="number" class="split-percent" min="1" max="100" value="${d.percentage}" />
+                <span class="percent-sign">%</span>
+                ${state.splitDestinations.length > 1 ? `<button class="btn-remove-dest btn-icon-small">X</button>` : ''}
+              </div>
+            `).join('')}
+          </div>
+          <div id="split-total" class="split-total">
+            Total: <span id="total-percent">${state.splitDestinations.reduce((sum, d) => sum + d.percentage, 0)}</span>%
+          </div>
         </div>
         
         <button id="btn-claim" class="btn-primary" disabled>Claim All</button>
@@ -682,25 +720,108 @@ function renderClaim() {
   const destInput = $('#dest-address') as HTMLInputElement;
   const claimBtn = $('#btn-claim') as HTMLButtonElement;
 
-  // Enable claim button if valid address
-  const validateAddress = () => {
-    try {
-      new PublicKey(destInput.value.trim());
-      claimBtn.disabled = false;
-    } catch {
-      claimBtn.disabled = true;
+  // Validate based on mode
+  const validateClaim = () => {
+    if (state.splitMode) {
+      // Validate all split destinations
+      const valid = state.splitDestinations.every(d => {
+        try {
+          new PublicKey(d.address.trim());
+          return d.percentage > 0;
+        } catch {
+          return false;
+        }
+      });
+      const totalPercent = state.splitDestinations.reduce((sum, d) => sum + d.percentage, 0);
+      claimBtn.disabled = !valid || Math.abs(totalPercent - 100) > 0.01;
+      
+      // Update total display
+      const totalEl = $('#total-percent');
+      if (totalEl) {
+        totalEl.textContent = totalPercent.toString();
+        totalEl.parentElement?.classList.toggle('invalid', Math.abs(totalPercent - 100) > 0.01);
+      }
+    } else {
+      // Single destination mode
+      try {
+        new PublicKey(destInput?.value?.trim() || '');
+        claimBtn.disabled = false;
+      } catch {
+        claimBtn.disabled = true;
+      }
     }
   };
   
-  destInput.addEventListener('input', validateAddress);
-  validateAddress(); // Check initial value
+  destInput?.addEventListener('input', validateClaim);
+  validateClaim(); // Check initial value
+
+  // Split mode toggle
+  $('#split-mode-toggle')?.addEventListener('change', (e) => {
+    state.splitMode = (e.target as HTMLInputElement).checked;
+    
+    // If switching to split mode, initialize with connected wallet if available
+    if (state.splitMode && state.splitDestinations[0].address === '' && connectedWallet) {
+      state.splitDestinations[0].address = connectedWallet.publicKey.toBase58();
+    }
+    
+    renderClaim();
+  });
+
+  // Add destination button
+  $('#btn-add-dest')?.addEventListener('click', () => {
+    if (state.splitDestinations.length >= 10) {
+      showToast('Maximum 10 destinations');
+      return;
+    }
+    
+    // Calculate remaining percentage
+    const used = state.splitDestinations.reduce((sum, d) => sum + d.percentage, 0);
+    const remaining = Math.max(0, 100 - used);
+    
+    state.splitDestinations.push({ address: '', percentage: remaining });
+    renderClaim();
+  });
+
+  // Remove destination buttons
+  document.querySelectorAll('.btn-remove-dest').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const row = (e.target as HTMLElement).closest('.split-row');
+      const index = parseInt(row?.getAttribute('data-index') || '0');
+      state.splitDestinations.splice(index, 1);
+      
+      // Redistribute percentage to first destination
+      if (state.splitDestinations.length === 1) {
+        state.splitDestinations[0].percentage = 100;
+      }
+      
+      renderClaim();
+    });
+  });
+
+  // Split address/percentage inputs
+  document.querySelectorAll('.split-address').forEach((input, i) => {
+    input.addEventListener('input', (e) => {
+      state.splitDestinations[i].address = (e.target as HTMLInputElement).value;
+      validateClaim();
+    });
+  });
+
+  document.querySelectorAll('.split-percent').forEach((input, i) => {
+    input.addEventListener('input', (e) => {
+      state.splitDestinations[i].percentage = parseInt((e.target as HTMLInputElement).value) || 0;
+      validateClaim();
+    });
+  });
 
   // Connect Phantom button
   $('#btn-connect-phantom')?.addEventListener('click', async () => {
     try {
       const wallet = await solWallet.connectWallet();
       state.solWalletConnected = true;
-      destInput.value = wallet.publicKey.toBase58();
+      if (destInput) destInput.value = wallet.publicKey.toBase58();
+      if (state.splitMode && state.splitDestinations[0].address === '') {
+        state.splitDestinations[0].address = wallet.publicKey.toBase58();
+      }
       renderClaim(); // Re-render with connected state
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Failed to connect Phantom');
@@ -718,19 +839,41 @@ function renderClaim() {
   claimBtn.addEventListener('click', async () => {
     if (!state.disposable) return;
 
-    const dest = destInput.value.trim();
-    let destPubkey: PublicKey;
-    try {
-      destPubkey = new PublicKey(dest);
-    } catch {
-      showToast('Invalid address');
-      return;
+    // Validate destinations based on mode
+    let destinations: claim.SplitDestination[];
+    
+    if (state.splitMode) {
+      // Split mode - multiple destinations
+      try {
+        destinations = state.splitDestinations.map(d => ({
+          address: new PublicKey(d.address.trim()),
+          percentage: d.percentage,
+        }));
+      } catch {
+        showToast('Invalid address in split destinations');
+        return;
+      }
+      
+      const totalPercent = destinations.reduce((sum, d) => sum + d.percentage, 0);
+      if (Math.abs(totalPercent - 100) > 0.01) {
+        showToast('Percentages must equal 100%');
+        return;
+      }
+    } else {
+      // Single destination mode
+      const dest = destInput.value.trim();
+      try {
+        destinations = [{ address: new PublicKey(dest), percentage: 100 }];
+      } catch {
+        showToast('Invalid address');
+        return;
+      }
     }
 
     show($('#claim-status'));
     show($('#claiming'));
     claimBtn.disabled = true;
-    destInput.disabled = true;
+    if (destInput) destInput.disabled = true;
 
     try {
       // Check if we need external fee payer
@@ -758,10 +901,11 @@ function renderClaim() {
           }
         };
       } else {
-        $('#claim-status-text')!.textContent = 'Claiming...';
+        $('#claim-status-text')!.textContent = state.splitMode ? 'Splitting funds...' : 'Claiming...';
       }
 
-      const sig = await claim.claimAll(state.disposable, destPubkey, claimOptions);
+      // Use claimSplit for all claims (handles both single and multiple destinations)
+      const sig = await claim.claimSplit(state.disposable, destinations, claimOptions);
       hide($('#claiming'));
       show($('#claim-success'));
       
@@ -773,7 +917,7 @@ function renderClaim() {
       const errorMsg = e instanceof Error ? e.message : 'Unknown error';
       showToast(`Claim failed: ${errorMsg}`);
       claimBtn.disabled = false;
-      destInput.disabled = false;
+      if (destInput) destInput.disabled = false;
     }
   });
 
